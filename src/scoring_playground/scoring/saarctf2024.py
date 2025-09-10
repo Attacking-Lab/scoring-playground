@@ -18,7 +18,6 @@ class SaarCTF2024(ScoringFormula):
     nop_team: TeamName | None = TeamName('NOP')
 
     defense_bug: bool = True # There is a bug in the gameserver's calculation of defense points, see below
-    attack_bug: bool = True # There is another bug in the attack point calculation relating to when the scoreboard rank is captured
 
     @staticmethod
     def _rank(scoreboard: Scoreboard, teams: typing.Sequence[TeamName]) -> typing.Mapping[TeamName, int]:
@@ -77,13 +76,12 @@ class SaarCTF2024(ScoringFormula):
                         continue
                     captured_flags.add(flag_id)
 
-                    if self.attack_bug:
-                        if flag.round_id > 0:
-                            victim_rank = rankings[flag.round_id][flag.owner]
-                        else:
-                            victim_rank = len(ctf.teams)
-                    else:
+                    if flag.round_id > 0:
                         victim_rank = rankings[flag.round_id][flag.owner]
+                    else:
+                        # In the first round, instead of everyone being rank 1, everyone is
+                        # at a very low rank (i.e., first-round flags are worth a bit less).
+                        victim_rank = len(ctf.teams)
 
                     previous_captures = ctf.flag_captures[flag_id].count_before_round(round_id)
                     current_captures = ctf.flag_captures[flag_id].count_in_round(round_id) + previous_captures
