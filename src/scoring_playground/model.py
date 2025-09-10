@@ -41,6 +41,15 @@ class FlagCaptures:
     by: typing.MutableMapping[RoundId, typing.MutableSequence[TeamName]] = \
         dataclasses.field(default_factory=lambda: collections.defaultdict(list))
 
+    def count_before_round(self, target_round_id: RoundId) -> int:
+        return sum(len(attackers) for round_id, attackers in self.by.items() if round_id < target_round_id)
+
+    def count_in_round(self, target_round_id: RoundId) -> int:
+        return len(self.by.get(target_round_id, []))
+
+    def count_including_round(self, target_round_id: RoundId) -> int:
+        return sum(len(attackers) for round_id, attackers in self.by.items() if round_id <= target_round_id)
+
 
 @dataclasses.dataclass(frozen=True)
 class TeamRoundData:

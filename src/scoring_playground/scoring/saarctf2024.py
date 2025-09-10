@@ -2,7 +2,7 @@ import dataclasses
 import collections
 import typing
 
-from ..model import CTF, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
+from ..model import CTF, FlagId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
 
 @dataclasses.dataclass(kw_only=True)
 class SaarCTF2024(ScoringFormula):
@@ -17,7 +17,8 @@ class SaarCTF2024(ScoringFormula):
     sla_factor: float = 1.0
     nop_team: TeamName | None = TeamName('NOP')
 
-    bug: bool = True # There is a bug in the gameserver's calculation of defense points, see below
+    defense_bug: bool = True # There is a bug in the gameserver's calculation of defense points, see below
+    attack_bug: bool = True # There is another bug in the attack point calculation relating to when the scoreboard rank is captured
 
     @staticmethod
     def _rank(scoreboard: Scoreboard, teams: typing.Sequence[TeamName]) -> typing.Mapping[TeamName, int]:
@@ -48,7 +49,6 @@ class SaarCTF2024(ScoringFormula):
         for round_id, round_data in ctf.enumerate():
             # Compute scoreboard rankings before this round
             rankings[round_id] = SaarCTF2024._rank(scoreboard, ctf.teams)
-            if round_id == len(ctf.rounds) - 1:import pprint;pprint.pprint(sorted(rankings[round_id].items(), key=lambda p: (p[1],p[0]))) # XXX
 
             # Compute SLA scores and count teams
             sla: typing.MutableMapping[tuple[TeamName, ServiceName], float] = collections.defaultdict(float)
@@ -63,58 +63,59 @@ class SaarCTF2024(ScoringFormula):
             for team in round_data.keys():
                 for service in ctf.services:
                     sla[(team, service)] *= num_active_teams[round_id] ** 0.5
+                scoreboard[team] += Score.default(sla=sum(sla[(team, service)] for service in ctf.services))
             previous_slas[round_id] = sla
 
-            # Compute attack and defense scores
+            # Compute attack scores
+            captured_flags: set[FlagId] = set()
             for team, team_data in round_data.items():
-                attack = defense = 0.0
-                # Stealing the flag gives you points based on the number of times the flag
-                # was captured. This is updated across rounds, so we can use the global count
-                # and only compute it once.
+                attack = 0.0
                 for flag_id in team_data.flags_captured:
                     flag = ctf.flags[flag_id]
                     if flag.owner == self.nop_team:
                         # These are not even submitted in saarCTF data.
                         continue
-                    victim_rank = rankings[flag.round_id][flag.owner]
-                    flag_value = 1 + (1 / ctf.flag_captures[flag_id].count) ** 0.5 + (1 / victim_rank) ** 0.5
-                    attack += flag_value / ctf.services[flag.service].flag_rate * self.off_factor
-                    if team == 'Bushwhackers':
-                        import wcwidth
-                        print('Flag: ' + flag.owner.ljust(40 + (len(flag.owner) - wcwidth.wcswidth(flag.owner))) + str(flag.round_id).ljust(4) + str(victim_rank).ljust(4) + str(ctf.flag_captures[flag_id].count).ljust(5) + str(flag_value).ljust(20) + '=> ' + str(attack)) # XXX
+                    captured_flags.add(flag_id)
 
-                # Similarly, defense score is only updated to the "newest" value, so we should be able
-                # to do this globally. However, this is not actually correct, since the updates consider
-                # the current round's number of active teams.
-                # If we use the buggy calculation, we need to come back later and update the defense scores
-                # when we have all the information.
-                if not self.bug:
-                    for flag_id in team_data.all_stored_flags.values():
-                        flag = ctf.flags[flag_id]
-                        victim_sla = previous_slas[flag.round_id][(flag.owner, flag.service)]
+                    if self.attack_bug:
+                        if flag.round_id > 0:
+                            victim_rank = rankings[RoundId(flag.round_id - 1)][flag.owner]
+                        else:
+                            victim_rank = len(ctf.teams)
+                    else:
+                        victim_rank = rankings[flag.round_id][flag.owner]
 
-                        # This is what was probably intended
-                        flag_value = (ctf.flag_captures[flag_id].count / num_active_teams[flag.round_id]) ** 0.3 * victim_sla
-                        defense -= flag_value / ctf.services[flag.service].flag_rate * self.def_factor
+                    previous_captures = ctf.flag_captures[flag_id].count_before_round(round_id)
+                    current_captures = ctf.flag_captures[flag_id].count_in_round(round_id) + previous_captures
 
-                sla_total = sum(sla[(team, service)] for service in ctf.services)
-                scoreboard[team] += Score.default(attack, defense, sla_total)
+                    if previous_captures:
+                        previous_flag_value = 1 + (1 / previous_captures) ** 0.5 + (1 / victim_rank) ** 0.5
+                    else:
+                        previous_flag_value = 0
+                    current_flag_value = 1 + (1 / current_captures) ** 0.5 + (1 / victim_rank) ** 0.5
 
-        if self.bug:
-            for team in ctf.teams:
-                defense = 0.0
-                for round_id, round_data in ctf.enumerate():
-                    team_data = round_data[team]
-                    for flag_id in team_data.all_stored_flags.values():
-                        flag = ctf.flags[flag_id]
-                        victim_sla = previous_slas[flag.round_id][(flag.owner, flag.service)]
-                        # Compute the iterative updates just for this flag
-                        captures = 0
-                        for captured_round, attackers in ctf.flag_captures[flag_id].by.items():
-                            previous_damage = (captures / num_active_teams[captured_round]) ** 0.3 * victim_sla
-                            captures += len(attackers)
-                            damage = (captures / num_active_teams[captured_round]) ** 0.3 * victim_sla
-                            defense -= (damage - previous_damage) / ctf.services[flag.service].flag_rate * self.def_factor
-                scoreboard[team] += Score.default(defense=defense)
+                    attack += (current_flag_value - previous_flag_value) / ctf.services[flag.service].flag_rate * self.off_factor
+                scoreboard[team] += Score.default(attack=attack)
+
+            # Compute defense scores
+            for flag_id in captured_flags:
+                flag = ctf.flags[flag_id]
+                victim_sla = previous_slas[flag.round_id][(flag.owner, flag.service)]
+
+                if self.defense_bug:
+                    team_count = num_active_teams[round_id]
+                else:
+                    # This is what was probably intended
+                    team_count = num_active_teams[flag.round_id]
+
+                previous_captures = ctf.flag_captures[flag_id].count_before_round(round_id)
+                current_captures = ctf.flag_captures[flag_id].count_in_round(round_id) + previous_captures
+
+                previous_damage = (previous_captures / team_count) ** 0.3 * victim_sla
+                current_damage = (current_captures / team_count) ** 0.3 * victim_sla
+
+                damage = (previous_damage - current_damage) / ctf.services[flag.service].flag_rate * self.def_factor
+                assert damage < 0 or (not victim_sla and damage <= 0)
+                scoreboard[flag.owner] += Score.default(defense=damage)
 
         return scoreboard
