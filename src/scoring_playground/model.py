@@ -91,11 +91,19 @@ class Service:
 
 
 @dataclasses.dataclass(frozen=True)
+class Config:
+    '''CTF configuration'''
+    flag_validity: int
+    flag_retention: int
+
+
+@dataclasses.dataclass(frozen=True)
 class CTF:
     '''A CTF'''
     services: typing.Mapping[ServiceName, Service]
     teams: tuple[TeamName, ...]
     rounds: tuple[typing.Mapping[TeamName, TeamRoundData], ...]
+    config: Config
 
     def __post_init__(self):
         # Freeze typing.Mapping (deserialized as dict, but it does not need to be mutable)
