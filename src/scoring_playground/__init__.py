@@ -14,6 +14,12 @@ def __main__() -> None:
     data_sources = sorted(source.__name__ for source in sources)
     scoring_formulas = sorted(formula.__name__ for formula in formulas)
 
+    help_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    help_parser.add_argument('-h', '--help', action='store_true')
+    help_parser.add_argument('--data')
+    help_parser.add_argument('--formula')
+    help_args, _ = help_parser.parse_known_args()
+
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--data', help='Selects the CTF data source', choices=data_sources, required=True)
     parser.add_argument('--formula', help='Selects the scoring formula', choices=scoring_formulas, required=True)
@@ -21,11 +27,7 @@ def __main__() -> None:
     parser.add_argument('--from-round', help='Assume the CTF started in this round (this round is included in scoring)', type=int)
     parser.add_argument('--to-round', help='Assume the CTF ended in this round (this round is included in scoring)', type=int)
 
-    base, remaining_args = parser.parse_known_args()
-    source = next(source for source in sources if source.__name__ == base.data)
-    formula = next(formula for formula in formulas if formula.__name__ == base.formula)
-
-    config_parser = argparse.ArgumentParser(allow_abbrev=False)
+    config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, usage=argparse.SUPPRESS)
 
     def base_type_of(type_hint: typing.Any, *, location: str | None = None) -> type:
         if type_hint is dataclasses.MISSING:
@@ -92,9 +94,26 @@ def __main__() -> None:
             return ty()
         return ty(**{ field.name: getattr(options, field.name) for field in dataclasses.fields(source) if field.name in options })
 
+    if help_args.help:
+        source = next((source for source in sources if source.__name__ == help_args.data), None)
+        formula = next((formula for formula in formulas if formula.__name__ == help_args.formula), None)
+        if source is not None:
+            build_options_parser(config_parser, 'data source options', source)
+        if formula is not None:
+            build_options_parser(config_parser, 'scoring formula options', formula)
 
-    build_options_parser(config_parser, 'Data source options', source)
-    build_options_parser(config_parser, 'Scoring formula options', formula)
+        # Print the main help and the config parser help, but strip out the (empty) config parser usage
+        parser.print_help()
+        print()
+        config_parser.print_help()
+        parser.exit()
+
+    base, remaining_args = parser.parse_known_args()
+    source = next(source for source in sources if source.__name__ == base.data)
+    formula = next(formula for formula in formulas if formula.__name__ == base.formula)
+
+    build_options_parser(config_parser, 'data source options', source)
+    build_options_parser(config_parser, 'scoring formula options', formula)
 
     options = config_parser.parse_args(remaining_args)
 
