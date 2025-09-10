@@ -35,19 +35,21 @@ def __main__() -> None:
             union_types = set(typing.get_args(type_hint))
             union_types.remove(type(None))
             if len(union_types) > 1:
-                warnings.warn('Cannot handle multi-type union {union_types}' + (f' for {location}' if location is not None else '') + ', falling back to str')
+                warnings.warn(f'Cannot handle multi-type union {union_types}' + (f' for {location}' if location is not None else '') + ', falling back to str')
                 return str
             if not union_types:
                 return type(None)
             return base_type_of(union_types.pop(), location=location)
         elif isinstance(type_hint, type):
             return type_hint
+        elif isinstance(type_hint, typing.NewType):
+            return base_type_of(type_hint.__supertype__, location=location)
         else:
-            warnings.warn('Cannot handle type hint {type_hint}' + (f' for {location}' if location is not None else '') + ', falling back to str')
+            warnings.warn(f'Cannot handle type hint {type_hint}' + (f' for {location}' if location is not None else '') + ', falling back to str')
             return str
 
     def build_options_parser(root: argparse.ArgumentParser, title: str, ty: type):
-        if not dataclasses.is_dataclass(source):
+        if not dataclasses.is_dataclass(ty):
             return
 
         fields = [field for field in dataclasses.fields(ty) if not field.name.startswith('_')]
