@@ -2,7 +2,6 @@
 name = "scoring-playground"
 version = "0.1.0"
 description = "AD CTF scoring playground"
-readme = "README.md"
 authors = [
     { name = "Tobias Holl", email = "tobias@tholl.xyz" }
 ]

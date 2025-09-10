@@ -79,7 +79,7 @@ class SaarCTF2024(ScoringFormula):
 
                     if self.attack_bug:
                         if flag.round_id > 0:
-                            victim_rank = rankings[RoundId(flag.round_id - 1)][flag.owner]
+                            victim_rank = rankings[flag.round_id][flag.owner]
                         else:
                             victim_rank = len(ctf.teams)
                     else:
