@@ -1,8 +1,10 @@
 import argparse
 import dataclasses
+import enum
 import msgspec
 import sys
 import tabulate
+import types
 import typing
 import warnings
 
@@ -33,7 +35,7 @@ def __main__() -> None:
         if type_hint is dataclasses.MISSING:
             warnings.warn('Missing type hint' + (f' for {location}' if location is not None else '') + ', falling back to str')
             return str
-        elif typing.get_origin(type_hint) is typing.Union:
+        elif typing.get_origin(type_hint) in (types.UnionType, typing.Union):
             union_types = set(typing.get_args(type_hint))
             union_types.remove(type(None))
             if len(union_types) > 1:
@@ -64,35 +66,44 @@ def __main__() -> None:
             expected_type = hints.get(field.name, dataclasses.MISSING)
             argument_type = base_type_of(expected_type, location=f'{ty.__name__}.{field.name}')
 
+            action = 'store'
             if argument_type is bool:
                 action = argparse.BooleanOptionalAction
-            elif argument_type is list:
-                action = 'append'
-            else:
-                action = 'store'
 
+            choices = None
+            if issubclass(argument_type, enum.Enum):
+                choices = argument_type.__members__.values()
+                argument_type = lambda key, enum_type=argument_type: enum_type[key] if key in enum_type.__members__ else key
+
+            required = False
+            help_text = None
             if field.default_factory is not dataclasses.MISSING:
-                required = False
                 help_text = '(default: dynamic)'
             elif field.default is not dataclasses.MISSING:
-                required = False
-                help_text = f'(default: {field.default!r})'
+                if field.default is None:
+                    help_text = '(default: unset)'
+                else:
+                    help_text = f'(default: {field.default!r})'
             else:
                 required = True
-                help_text = None
 
             subparser.add_argument(
                 '--' + field.name.replace('_', '-'),
                 action=action,
+                choices=choices,
                 help=help_text,
                 required=required,
                 type=argument_type,
             )
 
     def configure[T](ty: type[T], options: argparse.Namespace) -> T:
-        if not dataclasses.is_dataclass(source):
+        if not dataclasses.is_dataclass(ty):
             return ty()
-        return ty(**{ field.name: getattr(options, field.name) for field in dataclasses.fields(source) if field.name in options })
+        return ty(**{
+            field.name: getattr(options, field.name)
+            for field in dataclasses.fields(ty)
+            if getattr(options, field.name, None) is not None
+        })
 
     if help_args.help:
         source = next((source for source in sources if source.__name__ == help_args.data), None)
