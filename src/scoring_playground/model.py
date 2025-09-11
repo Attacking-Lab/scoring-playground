@@ -90,12 +90,16 @@ class Service:
     flag_rate: float | msgspec.UnsetType = msgspec.UNSET
 
 
+@defaults(
+    # "Normal" CTFs retrieve flags for the amount of rounds they are valid for
+    flag_retention = lambda self: typing.cast(Config, self).flag_validity
+)
 @dataclasses.dataclass(frozen=True)
 class Config:
     '''CTF configuration'''
     flag_validity: int
-    flag_retention: int
     messages: tuple[str, ...]
+    flag_retention: int | msgspec.UnsetType = msgspec.UNSET
 
 
 @dataclasses.dataclass(frozen=True)
