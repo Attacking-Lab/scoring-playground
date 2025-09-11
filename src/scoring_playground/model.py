@@ -95,6 +95,7 @@ class Config:
     '''CTF configuration'''
     flag_validity: int
     flag_retention: int
+    messages: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)

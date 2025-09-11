@@ -31,26 +31,28 @@ def __main__() -> None:
 
     config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, usage=argparse.SUPPRESS)
 
-    def base_type_of(type_hint: typing.Any, *, location: str | None = None) -> type:
+    def base_type_of(type_hint: typing.Any, *, location: str | None = None) -> tuple[type, bool]: # (type, allowed to be none?)
         if type_hint is dataclasses.MISSING:
             warnings.warn('Missing type hint' + (f' for {location}' if location is not None else '') + ', falling back to str')
-            return str
+            return str, False
         elif typing.get_origin(type_hint) in (types.UnionType, typing.Union):
             union_types = set(typing.get_args(type_hint))
-            union_types.remove(type(None))
+            may_be_none = type(None) in union_types or None in union_types
+            union_types -= { type(None), None }
             if len(union_types) > 1:
                 warnings.warn(f'Cannot handle multi-type union {union_types}' + (f' for {location}' if location is not None else '') + ', falling back to str')
-                return str
+                return str, may_be_none
             if not union_types:
-                return type(None)
-            return base_type_of(union_types.pop(), location=location)
+                raise TypeError('Union type contains only None')
+            base_type, base_may_be_none = base_type_of(union_types.pop(), location=location)
+            return base_type, base_may_be_none or may_be_none
         elif isinstance(type_hint, type):
-            return type_hint
+            return type_hint, False
         elif isinstance(type_hint, typing.NewType):
             return base_type_of(type_hint.__supertype__, location=location)
         else:
             warnings.warn(f'Cannot handle type hint {type_hint}' + (f' for {location}' if location is not None else '') + ', falling back to str')
-            return str
+            return str, False
 
     def build_options_parser(root: argparse.ArgumentParser, title: str, ty: type):
         if not dataclasses.is_dataclass(ty):
@@ -64,7 +66,7 @@ def __main__() -> None:
         subparser = root.add_argument_group(title)
         for field in fields:
             expected_type = hints.get(field.name, dataclasses.MISSING)
-            argument_type = base_type_of(expected_type, location=f'{ty.__name__}.{field.name}')
+            argument_type, may_be_none = base_type_of(expected_type, location=f'{ty.__name__}.{field.name}')
 
             action = 'store'
             if argument_type is bool:
@@ -87,10 +89,22 @@ def __main__() -> None:
             else:
                 required = True
 
-            subparser.add_argument(
+            if may_be_none:
+                group = subparser.add_mutually_exclusive_group()
+                group.add_argument(
+                    '--no-' + field.name.replace('_', '-'),
+                    action='store_const',
+                    const=None,
+                    dest=field.name,
+                )
+            else:
+                group = subparser
+            group.add_argument(
                 '--' + field.name.replace('_', '-'),
                 action=action,
                 choices=choices,
+                default=argparse.SUPPRESS,
+                dest=field.name,
                 help=help_text,
                 required=required,
                 type=argument_type,
@@ -102,7 +116,7 @@ def __main__() -> None:
         return ty(**{
             field.name: getattr(options, field.name)
             for field in dataclasses.fields(ty)
-            if getattr(options, field.name, None) is not None
+            if field.name in options
         })
 
     if help_args.help:
@@ -132,6 +146,8 @@ def __main__() -> None:
     scoring_formula = configure(formula, options)
 
     ctf = data_source.load().slice(base.from_round, base.to_round)
+    for message in ctf.config.messages:
+        print('\x1b[33m' + message + '\x1b[0m', file=sys.stderr)
     scoreboard = scoring_formula.evaluate(ctf)
 
     match base.output_format:
