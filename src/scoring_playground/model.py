@@ -98,7 +98,7 @@ class Service:
 class Config:
     '''CTF configuration'''
     flag_validity: int
-    messages: tuple[str, ...]
+    messages: tuple[str, ...] = ()
     flag_retention: int | msgspec.UnsetType = msgspec.UNSET
 
 
