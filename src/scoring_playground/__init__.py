@@ -132,6 +132,8 @@ def __main__() -> None:
     scoring_formula = configure(formula, options)
 
     ctf = data_source.load().slice(base.from_round, base.to_round)
+    for message in ctf.config.messages:
+        print('\x1b[33m' + message + '\x1b[0m', file=sys.stderr)
     scoreboard = scoring_formula.evaluate(ctf)
 
     match base.output_format:
