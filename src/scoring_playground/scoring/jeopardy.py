@@ -8,9 +8,9 @@ from ..model import CTF, FlagId, FlagStoreId, RoundId, Score, Scoreboard, Scorin
 class Wrapper:
     '''Wrapper for a jeopardy formula'''
     # This is required because enum.Enum.__members__ won't work otherwise
-    def __init__(self, implementation: typing.Callable[[int, int, float | None, float | None, float, float], float]):
+    def __init__(self, implementation: typing.Callable[[float, int, float | None, float | None, float, float], float]):
         self.implementation = implementation
-    def __call__(self, solves: int, teams: int, alpha: float | None, beta: float | None, max_score: float, min_score: float) -> float:
+    def __call__(self, solves: float, teams: int, alpha: float | None, beta: float | None, max_score: float, min_score: float) -> float:
         return self.implementation(solves, teams, alpha, beta, max_score, min_score)
 
 
@@ -50,6 +50,13 @@ class JeopardyFormula(enum.Enum):
     )
 
 
+class AttackerMode(enum.Enum):
+    '''How to determine which teams are attacking'''
+    Everyone = 0 # Everyone is attacking all the time
+    Successful = 1 # Only someone who actually gets a flag from this round is attacking
+    Scaled = 2 # Same as `Successful`, but scale the "value" of the attackers up to the full team count
+
+
 @dataclasses.dataclass(kw_only=True)
 class Jeopardy(ScoringFormula):
     '''This is a jeopardy-based scoring formula'''
@@ -62,10 +69,14 @@ class Jeopardy(ScoringFormula):
 
     sla: float = 5.0 # Value of the non-decaying SLA flags
 
+    attackers: AttackerMode = AttackerMode.Everyone
+
     nop_team: TeamName | None = TeamName('NOP')
 
-    def _jeopardy(self, solves: int, ctf: CTF) -> float:
+    def _jeopardy(self, solves: float, ctf: CTF) -> float:
         # Forcibly clamp the score to 0 - capturing flags should never be worth negative points.
+        # Note that the solve count is a float rather than an int because all formulas allow
+        # interpolation and it could be useful in some places.
         return max(
             self.jeopardy.value(solves, len(ctf.teams), self.alpha, self.beta, self.max, self.min),
             0
@@ -137,11 +148,22 @@ class Jeopardy(ScoringFormula):
             eligible_teams = len(ctf.teams) - (1 if self.nop_team is not None else 0) - 1
             for service, flagstore in ctf.flagstores:
                 by_team = attacking_teams[(round_id, service, flagstore)]
-                for attacker in ctf.teams:
+
+                match self.attackers:
+                    case AttackerMode.Everyone:
+                        attackers = ctf.teams
+                    case AttackerMode.Successful | AttackerMode.Scaled:
+                        attackers = [team for team in ctf.teams if len(by_team[team]) > 0]
+
+                for attacker in attackers:
                     if attacker == self.nop_team:
                         continue
                     # What is not getting exploited by this team worth?
-                    value = self._jeopardy(eligible_teams - len(by_team[attacker]), ctf)
+                    # TODO: This should probably consider whether teams were offline in that round or not.
+                    not_exploited = eligible_teams - len(by_team[attacker])
+                    value = self._jeopardy(not_exploited, ctf)
+                    if self.attackers == AttackerMode.Scaled:
+                        value *= eligible_teams / len(attackers)
                     # Who did not get exploited?
                     for other in ctf.teams:
                         if other == attacker or other in by_team[attacker]:
