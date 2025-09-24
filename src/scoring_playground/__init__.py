@@ -12,7 +12,7 @@ from .data import sources
 from .scoring import formulas
 from .model import Score
 
-def __main__() -> None:
+def parse_args(args: list[str]):
     data_sources = sorted(source.__name__ for source in sources)
     scoring_formulas = sorted(formula.__name__ for formula in formulas)
 
@@ -20,7 +20,7 @@ def __main__() -> None:
     help_parser.add_argument('-h', '--help', action='store_true')
     help_parser.add_argument('--data')
     help_parser.add_argument('--formula')
-    help_args, _ = help_parser.parse_known_args()
+    help_args, _ = help_parser.parse_known_args(args)
 
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--data', help='Selects the CTF data source', choices=data_sources, required=True)
@@ -133,7 +133,7 @@ def __main__() -> None:
         config_parser.print_help()
         parser.exit()
 
-    base, remaining_args = parser.parse_known_args()
+    base, remaining_args = parser.parse_known_args(args)
     source = next(source for source in sources if source.__name__ == base.data)
     formula = next(formula for formula in formulas if formula.__name__ == base.formula)
 
@@ -144,6 +144,12 @@ def __main__() -> None:
 
     data_source = configure(source, options)
     scoring_formula = configure(formula, options)
+
+    return base, data_source, scoring_formula
+
+
+def __main__() -> None:
+    base, data_source, scoring_formula = parse_args(sys.argv[1:])
 
     ctf = data_source.load().slice(base.from_round, base.to_round)
     for message in ctf.config.messages:

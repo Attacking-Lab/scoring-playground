@@ -5,13 +5,14 @@ description = "AD CTF scoring playground"
 authors = [
     { name = "Tobias Holl", email = "tobias@tholl.xyz" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "frozendict>=2.4.6",
     "msgspec>=0.19.0",
     "tabulate>=0.9.0",
     "types-tabulate>=0.9.0.20241207",
     "wcwidth>=0.2.13",
+    "matplotlib>=3.9.0",
 ]
 
 [project.scripts]

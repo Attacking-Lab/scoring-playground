@@ -172,6 +172,16 @@ class Score:
             }
         )
 
+    def __sub__(self, other: typing.Self) -> typing.Self:
+        return type(self)(
+            combined=self.combined - other.combined,
+            categories={
+                cat: self.categories[cat] - other.categories[cat]
+                for cat in self.categories.keys() | other.categories.keys()
+            }
+        )
+
+
     @staticmethod
     def get_categories(scoreboard: 'Scoreboard') -> typing.Sequence[str]:
         keys = set()

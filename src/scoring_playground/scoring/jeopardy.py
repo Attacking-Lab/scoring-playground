@@ -86,104 +86,88 @@ class Jeopardy(ScoringFormula):
         if self.nop_team is not None and self.nop_team not in ctf.teams:
             raise KeyError(f'Configured NOP team {str(self.nop_team)!r} not found in the CTF data')
 
-        # Pre-compute which teams exploited which teams on which service/flagstore/round combinations
-        attacking_teams: typing.MutableMapping[
+        # Pre-compute victims for each service/flagstore/attacker,
+        # attributed back to the round in which the stolen flag was deployed
+        attacked_teams: typing.MutableMapping[
             tuple[RoundId, ServiceName, FlagStoreId],
-            typing.MutableMapping[TeamName, set[FlagId]]
+            typing.MutableMapping[TeamName, set[TeamName]]
         ] = collections.defaultdict(lambda: collections.defaultdict(set))
-
         for round_id, round_data in ctf.enumerate():
             for team, team_data in round_data.items():
                 for flag_id in team_data.flags_captured:
                     flag = ctf.flags[flag_id]
-                    attacking_teams[(flag.round_id, flag.service, flag.flagstore)][team].add(flag_id)
-
-        # Flags that we've already seen, in case of duplicates
-        flags_seen: dict[TeamName, set[FlagId]] = { team: set() for team in ctf.teams }
+                    if flag.owner == team or flag.owner == self.nop_team:
+                        continue
+                    attacked_teams[(flag.round_id, flag.service, flag.flagstore)][team].add(ctf.flags[flag_id].owner)
 
         # Do the scoreboard calculations
         scoreboard: Scoreboard = collections.defaultdict(Score.default)
         for round_id, round_data in ctf.enumerate():
             # SLA flags:
-            #   You gain a fixed SLA score for each flag available from the retention period,
-            #   as long as the service is in the OK or RECOVERING state
+            #   You gain a fixed SLA score for each flag available from the
+            #   retention period, as long as the status is OK or RECOVERING.
             for team, team_data in round_data.items():
                 sla = 0.0
                 for service, state in team_data.service_states.items():
-                    # TODO: We don't have information on _how many_ flags from the retention
-                    # period are missing in RECOVERING, so try to work backwards (and assume
-                    # that all flag stores are equally affected)
                     max_flags = min(round_id + 1, ctf.config.flag_retention)
                     if state == ServiceState.OK:
-                        # All flags are there
                         present = max_flags
                     elif state == ServiceState.RECOVERING:
-                        # All flags are there for the rounds that have been RECOVERING, but at least the oldest is missing
                         present = 1
+                        # XXX: We assume here that flags which were present in
+                        #      previous rounds are still present and returned.
                         for previous_round in range(round_id - 1, max(-1, round_id - ctf.config.flag_retention), -1):
                             if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
                                 break
                             present += 1
                         present = min(present, max_flags)
                     else:
-                        present = 0 # No flags for you in non-RECOVERING/OK states.
+                        present = 0
                     sla += self.sla * present * len(ctf.services[service].flagstores)
                 scoreboard[team] += Score.default(sla=sla)
 
-            # Defense flags
-            #   For each flag that is still valid,
-            #   for each attacking team,
+            # Estimate playing teams by service status.
+            online = {}
+            for team in round_data.values():
+                online[team] = any(s != ServiceState.OFFLINE for s in team.service_states)
+            online_cnt = sum(int(state) for state in online.values())
+
+            # Defense flags:
+            #   For each flag that is still valid, for each attacking team,
             #   if you did not get exploited by that team
-            #   you get points scaled by the number of teams that that team did not exploit
-            # There are (teams - 2) * rounds * flagstores flags to capture here.
-            # (If we restrict the definition of "attacking team" to those that actually capture flags
-            # the flag count drops dramatically)
-            # TODO: Where does the "that is still valid" go? Currently this is implicit in the data...
-            # TODO: NOP team treatment here?
-            # TODO: Note that this means that losing flags to a team who exploits _everyone_ is worse for
-            #       you than losing flags to a team who exploits only a few people.
-            #       This is somewhat counterintuitive.
-            #       On the other hand, this rewards being one of a few to patch a difficult vulnerability
-            #       that is being exploited.
-            eligible_teams = len(ctf.teams) - (1 if self.nop_team is not None else 0) - 1
+            #   you get points scaled by the number of teams that that team did not exploit.
+            max_victims = online_cnt - (1 if self.nop_team is not None else 0) - 1
             for service, flagstore in ctf.flagstores:
-                by_team = attacking_teams[(round_id, service, flagstore)]
+                victims_of = attacked_teams[(round_id, service, flagstore)]
 
                 match self.attackers:
                     case AttackerMode.Everyone:
                         attackers = ctf.teams
                     case AttackerMode.Successful | AttackerMode.Scaled:
-                        attackers = [team for team in ctf.teams if len(by_team[team]) > 0]
+                        attackers = [team for team in ctf.teams if len(victims_of[team]) > 0]
 
                 for attacker in attackers:
                     if attacker == self.nop_team:
                         continue
-                    # What is not getting exploited by this team worth?
-                    # TODO: This should probably consider whether teams were offline in that round or not.
-                    not_exploited = eligible_teams - len(by_team[attacker])
+                    not_exploited = max_victims - len(victims_of[attacker])
                     value = self._jeopardy(not_exploited, ctf)
                     if self.attackers == AttackerMode.Scaled:
-                        value *= eligible_teams / len(attackers)
-                    # Who did not get exploited?
-                    for other in ctf.teams:
-                        if other == attacker or other in by_team[attacker]:
+                        value *= max_victims / len(attackers)
+                    for other, other_data in round_data.items():
+                        if other == attacker or other in victims_of[attacker]:
+                            continue
+                        if other_data.service_states[service] not in (ServiceState.OK, ServiceState.RECOVERING):
                             continue
                         scoreboard[other] += Score.default(defense=value)
 
-
-            # Attack flags
-            #  For each flag that is still valid,
-            #  if you capture that flag
-            #  you get points scaled by how many teams captured that flag
-            # There are (teams - 2) * rounds * flagstores flags to capture here.
+            # Attack flags:
+            #   For each flag that is still valid, if you capture that flag
+            #   you get points scaled by how many teams captured that flag.
             for team, team_data in round_data.items():
                 attack = 0.0
                 for flag_id in team_data.flags_captured:
-                    if flag_id in flags_seen[team]:
-                        continue
-                    flags_seen[team].add(flag_id)
                     flag = ctf.flags[flag_id]
-                    if flag.owner == self.nop_team or flag.owner == team:
+                    if flag.owner == team or flag.owner == self.nop_team:
                         continue
                     attack += self._jeopardy(ctf.flag_captures[flag_id].count, ctf)
                 scoreboard[team] += Score.default(attack=attack)
