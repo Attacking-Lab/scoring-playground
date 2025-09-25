@@ -3,7 +3,9 @@ import enum
 import collections
 import typing
 
-from ..model import CTF, FlagId, FlagStoreId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
+from msgspec import UNSET
+
+from ..model import CTF, FlagStoreId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
 
 class Wrapper:
     '''Wrapper for a jeopardy formula'''
@@ -34,19 +36,24 @@ class JeopardyFormula(enum.Enum):
         return self.name
     # Exponential formula for fixed team counts used at DHM (2025: alpha = 0.705, 2024: alpha = 1.7)
     DHM = Wrapper(
-        lambda solves, teams, alpha, beta, max_score, min_score:
+        lambda solves, teams, alpha, beta, min_score, max_score:
             max_score * (min_score / max_score) ** ((max(0, solves - 1) / max(1, teams - 1)) ** or_default(alpha, 0.705))
             + assert_none(beta, 'beta')
     )
     # "Normal" decaying formula used e.g. by 34C3 CTF and CSCG
     CSCG = Wrapper(
-        lambda solves, _teams, alpha, beta, max_score, min_score:
+        lambda solves, _teams, alpha, beta, min_score, max_score:
             min_score + (max_score - min_score) / (1 + (max(0, solves - 1) / or_default(beta, 11.92201)) ** or_default(alpha, 1.206069))
     )
     # "Normal" decaying formula used e.g. by hxp CTF
     hxp = Wrapper(
-        lambda solves, _teams, alpha, beta, max_score, _min_score:
+        lambda solves, _teams, alpha, beta, _min_score, max_score:
             max_score * min(1, or_default(alpha, 10.0) / (or_default(beta, 9.0) + solves))
+    )
+    # "Normal" decaying formula used e.g. by ECSC 2025
+    ECSC2025 = Wrapper(
+        lambda solves, teams, _alpha, _beta, min_score, max_score:
+            max(int(max_score * ((teams - 10) / (teams - 11 + max(solves, 1))) ** 3), min_score)
     )
 
 
@@ -64,10 +71,8 @@ class Jeopardy(ScoringFormula):
     jeopardy: JeopardyFormula
     alpha: float | None = None # Formula-specfic parameters
     beta: float | None = None # Formula-specific parameters
-    max: float = 10.0 # Target maximum/base score
-    min: float = 1.0 # Target minimum score (may be ignored by individual formulas)
-
-    sla: float = 5.0 # Value of the non-decaying SLA flags
+    base: float = 10.0 # Base challenge value / scaling factor
+    min: float = 1.0 # Minimum value per challenge
 
     attackers: AttackerMode = AttackerMode.Everyone
 
@@ -78,13 +83,16 @@ class Jeopardy(ScoringFormula):
         # Note that the solve count is a float rather than an int because all formulas allow
         # interpolation and it could be useful in some places.
         return max(
-            self.jeopardy.value(solves, len(ctf.teams), self.alpha, self.beta, self.max, self.min),
+            self.jeopardy.value(solves, len(ctf.teams), self.alpha, self.beta, self.min, self.base),
             0
         )
 
     def evaluate(self, ctf: CTF) -> Scoreboard:
         if self.nop_team is not None and self.nop_team not in ctf.teams:
             raise KeyError(f'Configured NOP team {str(self.nop_team)!r} not found in the CTF data')
+
+        if ctf.config.flag_retention is UNSET:
+            raise KeyError(f'No flag retention period defined in CTF data')
 
         # Pre-compute victims for each service/flagstore/attacker,
         # attributed back to the round in which the stolen flag was deployed
@@ -99,10 +107,20 @@ class Jeopardy(ScoringFormula):
                     if flag.owner == team or flag.owner == self.nop_team:
                         continue
                     attacked_teams[(flag.round_id, flag.service, flag.flagstore)][team].add(ctf.flags[flag_id].owner)
+        
+        # Pre-compute the online-teams per round as teams that
+        # dont have all services returning 'OFFLINE'.
+        online_teams: typing.MutableMapping[RoundId, set[TeamName]] = {}
+        for round_id, round_data in ctf.enumerate():
+            online_teams[round_id] =set()
+            for team, team_data in round_data.items():
+                if any(s != ServiceState.OFFLINE for s in team_data.service_states):
+                    online_teams[round_id].add(team)
 
         # Do the scoreboard calculations
         scoreboard: Scoreboard = collections.defaultdict(Score.default)
         for round_id, round_data in ctf.enumerate():
+            online_cnt = len(online_teams[round_id])
             # SLA flags:
             #   You gain a fixed SLA score for each flag available from the
             #   retention period, as long as the status is OK or RECOVERING.
@@ -116,25 +134,19 @@ class Jeopardy(ScoringFormula):
                         present = 1
                         # XXX: We assume here that flags which were present in
                         #      previous rounds are still present and returned.
-                        for previous_round in range(round_id - 1, max(-1, round_id - ctf.config.flag_retention), -1):
+                        for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id - 1)):
                             if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
                                 break
                             present += 1
                         present = min(present, max_flags)
                     else:
                         present = 0
-                    sla += self.sla * present * len(ctf.services[service].flagstores)
+                    sla += self.base * present / max_flags * len(ctf.services[service].flagstores)
                 scoreboard[team] += Score.default(sla=sla)
-
-            # Estimate playing teams by service status.
-            online = {}
-            for team in round_data.values():
-                online[team] = any(s != ServiceState.OFFLINE for s in team.service_states)
-            online_cnt = sum(int(state) for state in online.values())
 
             # Defense flags:
             #   For each flag that is still valid, for each attacking team,
-            #   if you did not get exploited by that team
+            #   if you did not get exploited by that team,
             #   you get points scaled by the number of teams that that team did not exploit.
             max_victims = online_cnt - (1 if self.nop_team is not None else 0) - 1
             for service, flagstore in ctf.flagstores:
