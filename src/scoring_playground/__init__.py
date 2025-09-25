@@ -96,6 +96,7 @@ def parse_args(args: list[str]):
                     action='store_const',
                     const=None,
                     dest=field.name,
+                    default=argparse.SUPPRESS,
                 )
             else:
                 group = subparser

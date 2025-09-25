@@ -117,13 +117,16 @@ class ATKLABv2(ScoringFormula):
             for team, team_data in round_data.items():
                 sla = 0.0
                 for service, state in team_data.service_states.items():
-                    max_flags = min(round_id + 1, ctf.config.flag_retention)
+                    flagstores = len(ctf.services[service].flagstores)
+                    max_rounds = min(round_id + 1, ctf.config.flag_retention)
+                    max_flags = max_rounds * flagstores
                     if state == ServiceState.OK:
                         present = max_flags
                     elif state == ServiceState.RECOVERING:
                         present = 1
-                        # XXX: We assume here that flags which were present in
-                        #      previous rounds are still present and returned.
+                        # XXX: We estimate here that flags which were present in
+                        #      previous rounds are still present and returned,
+                        #      because the IL does not encode flags retrieved (yet).
                         for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id - 1)):
                             if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
                                 break
@@ -131,8 +134,20 @@ class ATKLABv2(ScoringFormula):
                         present = min(present, max_flags)
                     else:
                         present = 0
-                    sla += self.base * present / max_flags * len(ctf.services[service].flagstores)
+                    sla += self.base * present / max_flags * flagstores
                 scoreboard[team] += Score.default(sla=sla)
+
+            # Attack flags:
+            #   For each flag that is still valid, if you capture that flag
+            #   you get points scaled by how many teams captured that flag.
+            for team, team_data in round_data.items():
+                attack = 0.0
+                for flag_id in team_data.flags_captured:
+                    flag = ctf.flags[flag_id]
+                    if flag.owner == team:
+                        continue
+                    attack += self._jeopardy(ctf.flag_captures[flag_id].count, ctf)
+                scoreboard[team] += Score.default(attack=attack)
 
             # Estimate the number of playing teams
             online_cnt = 0
@@ -162,24 +177,10 @@ class ATKLABv2(ScoringFormula):
                     if self.attackers == AttackerMode.Scaled:
                         value *= max_victims / len(attackers)
                     for other, other_data in round_data.items():
-                        if other == self.nop_team:
-                            continue
                         if other == attacker or other in victims_of[attacker]:
                             continue
                         if other_data.service_states[service] not in (ServiceState.OK, ServiceState.RECOVERING):
                             continue
                         scoreboard[other] += Score.default(defense=value)
-
-            # Attack flags:
-            #   For each flag that is still valid, if you capture that flag
-            #   you get points scaled by how many teams captured that flag.
-            for team, team_data in round_data.items():
-                attack = 0.0
-                for flag_id in team_data.flags_captured:
-                    flag = ctf.flags[flag_id]
-                    if flag.owner == team or flag.owner == self.nop_team:
-                        continue
-                    attack += self._jeopardy(ctf.flag_captures[flag_id].count, ctf)
-                scoreboard[team] += Score.default(attack=attack)
 
         return scoreboard
