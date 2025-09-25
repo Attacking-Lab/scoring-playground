@@ -53,7 +53,7 @@ class JeopardyFormula(enum.Enum):
     # "Normal" decaying formula used e.g. by ECSC 2025
     ECSC2025 = Wrapper(
         lambda solves, teams, _alpha, _beta, min_score, max_score:
-            max(int(max_score * ((teams - 10) / (teams - 11 + max(solves, 1))) ** 3), min_score)
+            max(int(max_score * ((teams * 3 / 4) / (teams * 3 / 4 - 1 + max(solves, 1))) ** 3), min_score)
     )
 
 
@@ -65,7 +65,7 @@ class AttackerMode(enum.Enum):
 
 
 @dataclasses.dataclass(kw_only=True)
-class Jeopardy(ScoringFormula):
+class ATKLABv2(ScoringFormula):
     '''This is a jeopardy-based scoring formula'''
 
     jeopardy: JeopardyFormula
@@ -107,20 +107,10 @@ class Jeopardy(ScoringFormula):
                     if flag.owner == team or flag.owner == self.nop_team:
                         continue
                     attacked_teams[(flag.round_id, flag.service, flag.flagstore)][team].add(ctf.flags[flag_id].owner)
-        
-        # Pre-compute the online-teams per round as teams that
-        # dont have all services returning 'OFFLINE'.
-        online_teams: typing.MutableMapping[RoundId, set[TeamName]] = {}
-        for round_id, round_data in ctf.enumerate():
-            online_teams[round_id] =set()
-            for team, team_data in round_data.items():
-                if any(s != ServiceState.OFFLINE for s in team_data.service_states):
-                    online_teams[round_id].add(team)
 
         # Do the scoreboard calculations
         scoreboard: Scoreboard = collections.defaultdict(Score.default)
         for round_id, round_data in ctf.enumerate():
-            online_cnt = len(online_teams[round_id])
             # SLA flags:
             #   You gain a fixed SLA score for each flag available from the
             #   retention period, as long as the status is OK or RECOVERING.
@@ -144,6 +134,12 @@ class Jeopardy(ScoringFormula):
                     sla += self.base * present / max_flags * len(ctf.services[service].flagstores)
                 scoreboard[team] += Score.default(sla=sla)
 
+            # Estimate the number of playing teams
+            online_cnt = 0
+            for team, team_data in round_data.items():
+                if any(s != ServiceState.OFFLINE for s in team_data.service_states):
+                    online_cnt += 1
+
             # Defense flags:
             #   For each flag that is still valid, for each attacking team,
             #   if you did not get exploited by that team,
@@ -166,6 +162,8 @@ class Jeopardy(ScoringFormula):
                     if self.attackers == AttackerMode.Scaled:
                         value *= max_victims / len(attackers)
                     for other, other_data in round_data.items():
+                        if other == self.nop_team:
+                            continue
                         if other == attacker or other in victims_of[attacker]:
                             continue
                         if other_data.service_states[service] not in (ServiceState.OK, ServiceState.RECOVERING):
