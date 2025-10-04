@@ -118,8 +118,7 @@ class ATKLABv2(ScoringFormula):
                 sla = 0.0
                 for service, state in team_data.service_states.items():
                     flagstores = len(ctf.services[service].flagstores)
-                    max_rounds = min(round_id + 1, ctf.config.flag_retention)
-                    max_flags = max_rounds * flagstores
+                    max_flags = ctf.config.flag_retention * flagstores
                     if state == ServiceState.OK:
                         present = max_flags
                     elif state == ServiceState.RECOVERING:
@@ -150,16 +149,15 @@ class ATKLABv2(ScoringFormula):
                 scoreboard[team] += Score.default(attack=attack)
 
             # Estimate the number of playing teams
-            online_cnt = 0
+            online = set()
             for team, team_data in round_data.items():
-                if any(s != ServiceState.OFFLINE for s in team_data.service_states):
-                    online_cnt += 1
+                if team != self.nop_team and any(s != ServiceState.OFFLINE for s in team_data.service_states):
+                    online.add(team)
 
             # Defense flags:
             #   For each flag that is still valid, for each attacking team,
             #   if you did not get exploited by that team,
             #   you get points scaled by the number of teams that that team did not exploit.
-            max_victims = online_cnt - (1 if self.nop_team is not None else 0) - 1
             for service, flagstore in ctf.flagstores:
                 victims_of = attacked_teams[(round_id, service, flagstore)]
 
@@ -170,6 +168,7 @@ class ATKLABv2(ScoringFormula):
                         attackers = [team for team in ctf.teams if len(victims_of[team]) > 0]
 
                 for attacker in attackers:
+                    max_victims = len(online - {attacker,})
                     if attacker == self.nop_team:
                         continue
                     not_exploited = max_victims - len(victims_of[attacker])
