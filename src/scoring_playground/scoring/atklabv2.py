@@ -126,7 +126,7 @@ class ATKLABv2(ScoringFormula):
                         # XXX: We estimate here that flags which were present in
                         #      previous rounds are still present and returned,
                         #      because the IL does not encode flags retrieved (yet).
-                        for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id - 1)):
+                        for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id)):
                             if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
                                 break
                             present += 1
