@@ -129,7 +129,7 @@ class ATKLABv2(ScoringFormula):
                         for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id - 1)):
                             if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
                                 break
-                            present += 1
+                            present += flagstores
                         present = min(present, max_flags)
                     else:
                         present = 0
