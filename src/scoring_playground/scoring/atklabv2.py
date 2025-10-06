@@ -2,10 +2,11 @@ import dataclasses
 import enum
 import collections
 import typing
+import warnings
 
 from msgspec import UNSET
 
-from ..model import CTF, FlagStoreId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
+from ..model import CTF, Flag, FlagStoreId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
 
 class Wrapper:
     '''Wrapper for a jeopardy formula'''
@@ -74,9 +75,12 @@ class ATKLABv2(ScoringFormula):
     base: float = 10.0 # Base challenge value / scaling factor
     min: float = 1.0 # Minimum value per challenge
 
-    attackers: AttackerMode = AttackerMode.Everyone
+    attackers: AttackerMode = AttackerMode.Scaled
+    defense_compensation: bool = True # Ensure unsuccessful attackers are not unduly punished
+    defense_respect_sla: bool = True # Respect SLA for defense calculations.
 
     nop_team: TeamName | None = TeamName('NOP')
+
 
     def _jeopardy(self, solves: float, ctf: CTF) -> float:
         # Forcibly clamp the score to 0 - capturing flags should never be worth negative points.
@@ -86,6 +90,11 @@ class ATKLABv2(ScoringFormula):
             self.jeopardy.value(solves, len(ctf.teams), self.alpha, self.beta, self.min, self.base),
             0
         )
+
+    def _warn_once_for_estimate(self):
+        if not self.__dict__.get('_estimate_flag_retention_did_warn'):
+            self.__dict__['_estimate_flag_retention_did_warn'] = True
+            warnings.warn('Estimating flag retention statistics from service states. This may be inaccurate.')
 
     def evaluate(self, ctf: CTF) -> Scoreboard:
         if self.nop_team is not None and self.nop_team not in ctf.teams:
@@ -126,6 +135,7 @@ class ATKLABv2(ScoringFormula):
                         # XXX: We estimate here that flags which were present in
                         #      previous rounds are still present and returned,
                         #      because the IL does not encode flags retrieved (yet).
+                        self._warn_once_for_estimate()
                         for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id - 1)):
                             if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
                                 break
@@ -143,7 +153,7 @@ class ATKLABv2(ScoringFormula):
                 attack = 0.0
                 for flag_id in team_data.flags_captured:
                     flag = ctf.flags[flag_id]
-                    if flag.owner == team:
+                    if flag.owner == team or self.nop_team in (flag.owner, team):
                         continue
                     attack += self._jeopardy(ctf.flag_captures[flag_id].count, ctf)
                 scoreboard[team] += Score.default(attack=attack)
@@ -159,27 +169,69 @@ class ATKLABv2(ScoringFormula):
             #   if you did not get exploited by that team,
             #   you get points scaled by the number of teams that that team did not exploit.
             for service, flagstore in ctf.flagstores:
-                victims_of = attacked_teams[(round_id, service, flagstore)]
+                # Attacking team (captured flags from the given round/service/flagstore tuple)
+                # to the set of teams it captured those flags from.
+                victims_by_attacker = attacked_teams[(round_id, service, flagstore)]
 
+                # Who do we count as an attacking team
                 match self.attackers:
                     case AttackerMode.Everyone:
                         attackers = ctf.teams
                     case AttackerMode.Successful | AttackerMode.Scaled:
-                        attackers = [team for team in ctf.teams if len(victims_of[team]) > 0]
+                        attackers = [team for team in ctf.teams if len(victims_by_attacker.get(team, set())) > 0]
 
-                for attacker in attackers:
-                    max_victims = len(online - {attacker,})
-                    if attacker == self.nop_team:
+                # Each team is trying to defend its flags.
+                # For each defending team:
+                for team in ctf.teams:
+                    if team == self.nop_team:
                         continue
-                    not_exploited = max_victims - len(victims_of[attacker])
-                    value = self._jeopardy(not_exploited, ctf)
-                    if self.attackers == AttackerMode.Scaled:
-                        value *= max_victims / len(attackers)
-                    for other, other_data in round_data.items():
-                        if other == attacker or other in victims_of[attacker]:
-                            continue
-                        if other_data.service_states[service] not in (ServiceState.OK, ServiceState.RECOVERING):
-                            continue
-                        scoreboard[other] += Score.default(defense=value)
+
+                    if self.defense_respect_sla:
+                        # Count how often this flag was present (you do not get points for rounds in which
+                        # the flag was not retrievable).
+                        # XXX: This is an estimate, the IL does not encode which flags were retrieved (yet)
+                        #      and we don't have that data.
+                        self._warn_once_for_estimate()
+                        def_sla = {
+                            check_round: ctf.rounds[check_round][team].service_states[service]
+                            for check_round in (RoundId(r) for r in range(round_id, round_id + ctf.config.flag_retention))
+                            if check_round < len(ctf.rounds)
+                        }
+                        max_check_round = max(def_sla.keys())
+                        present = 0
+                        for check_round, state in def_sla.items():
+                            match state:
+                                case ServiceState.OK:
+                                    present += 1
+                                case ServiceState.RECOVERING:
+                                    present += 1 if any(
+                                        def_sla[RoundId(future)] == ServiceState.OK
+                                        for future in range(check_round, max_check_round + 1)
+                                    ) else 0
+                                # NB: If you ever replace this estimate: this also implements the
+                                # filter on service state!
+                        sla_factor = present / ctf.config.flag_retention
+                        base_factor = len(def_sla) / ctf.config.flag_retention
+                    else:
+                        sla_factor = base_factor = 1.0
+
+                    # Figure out who attacked this flag (depending on the mode, typically
+                    # each team that grabbed a flag of this round/service/flag store)
+                    for attacker in attackers:
+                        # How many flags did they get of that combination
+                        max_victims = max(len(online) - 1, 1)
+                        not_exploited = max_victims - len(victims_by_attacker[attacker])
+                        value = self._jeopardy(not_exploited, ctf)
+
+                        if team in victims_by_attacker[attacker]:
+                            continue # Didn't protect against them
+
+                        if self.attackers == AttackerMode.Scaled:
+                            value *= max_victims / len(attackers)
+
+                        if self.defense_compensation and attacker == team:
+                            scoreboard[team] += Score.default(attack=value * base_factor)
+                        elif attacker != team:
+                            scoreboard[team] += Score.default(defense=value * sla_factor)
 
         return scoreboard
