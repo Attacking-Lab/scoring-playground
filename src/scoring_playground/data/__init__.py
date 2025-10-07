@@ -11,10 +11,14 @@ class ENOWARS2024(JSONDataSource, file_name='enowars2024.json'):
 class FaustCTF2024(JSONDataSource, file_name='faustctf2024.json'):
     '''CTF data from FaustCTF 2024'''
 
+class ECSC2024(JSONDataSource, file_name='ecsc2024.json'):
+    '''CTF data from ECSC 2024'''
+
 sources: list[type[DataSource]] = [
     ENOWARS2024,
     SaarCTF2024,
-    FaustCTF2024
+    FaustCTF2024,
+    ECSC2024,
 ]
 __all__ = ['sources', 'ENOWARS2024', 'SaarCTF2024', 'FaustCTF2024']
 
