@@ -28,6 +28,7 @@ def parse_args(args: list[str]):
     parser.add_argument('--output-format', help='Output format', choices=('json', 'table'), default='table')
     parser.add_argument('--from-round', help='Assume the CTF started in this round (this round is included in scoring)', type=int)
     parser.add_argument('--to-round', help='Assume the CTF ended in this round (this round is included in scoring)', type=int)
+    parser.add_argument('--scale-to', help='Scale the final scoreboard to this maximum point count', type=float)
 
     config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, usage=argparse.SUPPRESS)
 
@@ -161,9 +162,14 @@ def __main__() -> None:
         case 'json':
             sys.stdout.buffer.write(msgspec.json.encode(scoreboard))
         case 'table':
-            keys = Score.get_categories(scoreboard)
+            keys = list(Score.get_categories(scoreboard))
             data = [
-                (team, score.combined, *(score.categories[key] for key in keys))
+                [team, score.combined, *(score.categories[key] for key in keys)]
                 for team, score in sorted(scoreboard.items(), key=lambda item: item[1].combined, reverse=True)
             ]
+            if base.scale_to:
+                keys.append('(scaled)')
+                max_score = data[0][1]
+                for row in data:
+                    row.append(row[1] / max_score * base.scale_to)
             print(tabulate.tabulate(data, headers=('Team', 'Score', *keys), tablefmt='simple_grid'))
