@@ -5,6 +5,7 @@ import enum
 import frozendict
 import msgspec
 import typing
+import warnings
 
 from .util import defaults, immutable_cache
 
@@ -22,6 +23,12 @@ class ServiceState(enum.Enum):
     MUMBLE = 'MUMBLE' # SLA violation (but team is active)
     OFFLINE = 'OFFLINE' # SLA violation (down/unreachable)
     ERROR = 'ERROR' # Checker-internal error
+
+
+class FlagState(enum.Enum):
+    '''State of an individual flag'''
+    OK = 'OK'
+    MISSING = 'MISSING'
 
 
 @dataclasses.dataclass
@@ -102,6 +109,10 @@ class Config:
     flag_retention: int | msgspec.UnsetType = msgspec.UNSET
 
 
+@defaults(
+    # Try to estimate flag states from the service states --- most CTF state is recorded in a lossy fashion
+    flag_states = lambda self: self._estimate_flag_states()
+)
 @dataclasses.dataclass(frozen=True)
 class CTF:
     '''A CTF'''
@@ -109,6 +120,7 @@ class CTF:
     teams: tuple[TeamName, ...]
     rounds: tuple[typing.Mapping[TeamName, TeamRoundData], ...]
     config: Config
+    flag_states: tuple[typing.Mapping[FlagId, FlagState], ...] | msgspec.UnsetType = msgspec.UNSET
 
     def __post_init__(self):
         # Freeze typing.Mapping (deserialized as dict, but it does not need to be mutable)
@@ -152,9 +164,81 @@ class CTF:
         '''Slices a subrange of the CTF (think rounds[from_round:to_round + 1])'''
         from_round = from_round if from_round is not None else 0
         to_round = (to_round + 1) if to_round is not None else len(self.rounds)
-        sliced = dataclasses.replace(self, rounds=self.rounds[from_round:to_round])
+        sliced = dataclasses.replace(
+            self,
+            rounds=self.rounds[from_round:to_round],
+            flag_states=self.flag_states[from_round:to_round] if self.flag_states is not msgspec.UNSET else msgspec.UNSET
+        )
         immutable_cache.reset(sliced)
         return sliced
+
+    def _estimate_flag_states(self) -> tuple[dict[FlagId, FlagState], ...]:
+        warnings.warn('Estimating flag availability from service states. This may be inaccurate.')
+        per_round = []
+        assert self.config.flag_retention is not msgspec.UNSET # Mostly to make typing happy, this is an @defaults entry
+        for round_id, round_data in self.enumerate():
+            round_result = {}
+            for team, team_data in round_data.items():
+                for service, state in team_data.service_states.items():
+                    checked_flags = set.union(*[
+                        set(self.rounds[placement][team].flags_stored[service].values())
+                        for placement in range(int(round_id) - self.config.flag_retention + 1, round_id + 1)
+                    ])
+                    match state:
+                        case ServiceState.OK:
+                            # All flags placed within the retention period are present (we know this for sure)
+                            for flag_id in checked_flags:
+                                round_result[flag_id] = FlagState.OK
+                        case ServiceState.ERROR:
+                            # This is a checker error. We don't actually know what flags are present. Just
+                            # assume that they're all there for fairness (this should not actually happen
+                            # but nothing is perfect).
+                            for flag_id in checked_flags:
+                                round_result[flag_id] = FlagState.OK
+                        case ServiceState.RECOVERING:
+                            # Some flags placed within the retention period are present, but not all of them.
+                            # The last one was available for sure, though, since otherwise we would be MUMBLE.
+                            # A best-effort approach is to say there is at least 1 flag present, with additional
+                            # flags present the sooner the state switches to OK in the future.
+                            # Alternatively, a "maximum" availability estimate can be achieved by dropping only
+                            # one round of flags (not the most recent one) from the list. A "minimum" can be
+                            # achieved by retaining _only_ the most recent set of flags.
+                            present = self.config.flag_retention - 1
+                            for future_round in range(int(round_id) + 1, int(round_id) + self.config.flag_retention):
+                                if future_round >= len(self.rounds):
+                                    # End of the CTF, I guess we will never know.
+                                    break
+                                if self.rounds[future_round][team].service_states[service] == ServiceState.OK:
+                                    # This round was OK, so here the last flag_retention flags were present.
+                                    # This means that our current max_present estimate is good.
+                                    break
+                                else:
+                                    # This round was not yet OK, so we can't have had _all_ the rounds present.
+                                    # This means we 'expect' there to be another flag missing in this round.
+                                    present -= 1
+                            present = min(self.config.flag_retention - 1, present)
+                            present = max(present, 1)
+                            # Arbitrarily pick the last 'present' rounds.
+                            present_flags = set.union(*[
+                                set(self.rounds[placement][team].flags_stored[service].values())
+                                for placement in range(int(round_id) - present + 1, round_id + 1)
+                            ])
+                            for flag_id in checked_flags:
+                                round_result[flag_id] = FlagState.OK if flag_id in present_flags else FlagState.MISSING
+                        case ServiceState.OFFLINE:
+                            # Service was unreachable, so no flags are checkable.
+                            for flag_id in checked_flags:
+                                round_result[flag_id] = FlagState.MISSING
+                        case ServiceState.MUMBLE:
+                            # We don't know which flags are still there, but generally, we can treat this as if
+                            # no flags could be fetched (typically, there won't be any SLA/DEF points for this
+                            # anyways, if individual flag state is considered at all).
+                            for flag_id in checked_flags:
+                                round_result[flag_id] = FlagState.MISSING
+                        case _:
+                            raise NotImplementedError(f'Somehow found an unknown service state: {state}')
+            per_round.append(round_result)
+        return tuple(per_round)
 
 
 @dataclasses.dataclass(slots=True, frozen=True, order=True)

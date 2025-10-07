@@ -2,11 +2,10 @@ import dataclasses
 import enum
 import collections
 import typing
-import warnings
 
 from msgspec import UNSET
 
-from ..model import CTF, Flag, FlagStoreId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
+from ..model import CTF, Flag, FlagState, FlagStoreId, RoundId, Score, Scoreboard, ScoringFormula, ServiceName, ServiceState, TeamName
 
 class Wrapper:
     '''Wrapper for a jeopardy formula'''
@@ -91,11 +90,6 @@ class ATKLABv2(ScoringFormula):
             0
         )
 
-    def _warn_once_for_estimate(self):
-        if not self.__dict__.get('_estimate_flag_retention_did_warn'):
-            self.__dict__['_estimate_flag_retention_did_warn'] = True
-            warnings.warn('Estimating flag retention statistics from service states. This may be inaccurate.')
-
     def evaluate(self, ctf: CTF) -> Scoreboard:
         if self.nop_team is not None and self.nop_team not in ctf.teams:
             raise KeyError(f'Configured NOP team {str(self.nop_team)!r} not found in the CTF data')
@@ -128,21 +122,18 @@ class ATKLABv2(ScoringFormula):
                 for service, state in team_data.service_states.items():
                     flagstores = len(ctf.services[service].flagstores)
                     max_flags = ctf.config.flag_retention * flagstores
-                    if state == ServiceState.OK:
-                        present = max_flags
-                    elif state == ServiceState.RECOVERING:
-                        present = 1
-                        # XXX: We estimate here that flags which were present in
-                        #      previous rounds are still present and returned,
-                        #      because the IL does not encode flags retrieved (yet).
-                        self._warn_once_for_estimate()
-                        for previous_round in reversed(range(max(0, round_id - ctf.config.flag_retention), round_id - 1)):
-                            if ctf.rounds[previous_round][team].service_states[service] != ServiceState.RECOVERING:
-                                break
-                            present += flagstores
-                        present = min(present, max_flags)
-                    else:
-                        present = 0
+                    present = 0
+                    match state:
+                        case ServiceState.OK:
+                            present = max_flags
+                        case ServiceState.RECOVERING:
+                            assert isinstance(ctf.flag_states, (tuple, list)) # Typing only, @defaults.
+                            for flagstore in ctf.services[service].flagstores:
+                                for placement_round in (RoundId(r) for r in range(max(round_id - ctf.config.flag_retention + 1, 0), round_id + 1)):
+                                    # Flag placed in round <placement_round> was available in this round?
+                                    flag_id = ctf.rounds[placement_round][team].flags_stored.get(service, {}).get(flagstore)
+                                    if flag_id is not None and ctf.flag_states[round_id].get(flag_id, FlagState.MISSING) == FlagState.OK:
+                                        present += 1
                     sla += self.base * present / max_flags * flagstores
                 scoreboard[team] += Score.default(sla=sla)
 
@@ -189,29 +180,23 @@ class ATKLABv2(ScoringFormula):
                     if self.defense_respect_sla:
                         # Count how often this flag was present (you do not get points for rounds in which
                         # the flag was not retrievable).
-                        # XXX: This is an estimate, the IL does not encode which flags were retrieved (yet)
-                        #      and we don't have that data.
-                        self._warn_once_for_estimate()
-                        def_sla = {
-                            check_round: ctf.rounds[check_round][team].service_states[service]
-                            for check_round in (RoundId(r) for r in range(round_id, round_id + ctf.config.flag_retention))
-                            if check_round < len(ctf.rounds)
-                        }
-                        max_check_round = max(def_sla.keys())
+                        assert isinstance(ctf.flag_states, (tuple, list)) # Typing only, @defaults.
+
+                        # This is the flag that was defended
+                        flag_id = ctf.rounds[round_id][team].flags_stored.get(service, {}).get(flagstore)
+
+                        # Was it there?
                         present = 0
-                        for check_round, state in def_sla.items():
-                            match state:
-                                case ServiceState.OK:
+                        max_present = 0
+                        for check_round in (RoundId(r) for r in range(round_id, min(len(ctf.rounds), round_id + ctf.config.flag_retention))):
+                            max_present += 1
+                            if flag_id is not None and ctf.flag_states[check_round].get(flag_id, FlagState.MISSING) == FlagState.OK:
+                                # Flag was placed and could be retrieved
+                                if ctf.rounds[check_round][team].service_states[service] in (ServiceState.OK, ServiceState.RECOVERING):
+                                    # ...and the service was in a state where you can get DEF points
                                     present += 1
-                                case ServiceState.RECOVERING:
-                                    present += 1 if any(
-                                        def_sla[RoundId(future)] == ServiceState.OK
-                                        for future in range(check_round, max_check_round + 1)
-                                    ) else 0
-                                # NB: If you ever replace this estimate: this also implements the
-                                # filter on service state!
                         sla_factor = present / ctf.config.flag_retention
-                        base_factor = len(def_sla) / ctf.config.flag_retention
+                        base_factor = max_present / ctf.config.flag_retention
                     else:
                         sla_factor = base_factor = 1.0
 
