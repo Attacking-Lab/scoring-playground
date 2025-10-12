@@ -95,7 +95,7 @@ class JeopardyFormula(enum.Enum):
     # "Normal" decaying formula used e.g. by ECSC 2025
     ECSC2025 = Wrapper(
         lambda solves, teams, _alpha, _beta, _min_score, max_score: max(
-            int(max_score * (30 / (29 + max(solves, 1))) ** 3),
+            max_score * (30 / (29 + max(solves, 1))) ** 3,
             0,
         )
     )
