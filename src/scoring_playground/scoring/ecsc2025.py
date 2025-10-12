@@ -1,5 +1,4 @@
 import dataclasses
-import enum
 import collections
 import typing
 
@@ -7,7 +6,6 @@ from msgspec import UNSET
 
 from ..model import (
     CTF,
-    Flag,
     FlagState,
     FlagStoreId,
     RoundId,
@@ -18,30 +16,6 @@ from ..model import (
     ServiceState,
     TeamName,
 )
-
-
-class Wrapper:
-    """Wrapper for a jeopardy formula"""
-
-    # This is required because enum.Enum.__members__ won't work otherwise
-    def __init__(
-        self,
-        implementation: typing.Callable[
-            [float, int, float | None, float | None, float, float], float
-        ],
-    ):
-        self.implementation = implementation
-
-    def __call__(
-        self,
-        solves: float,
-        teams: int,
-        alpha: float | None,
-        beta: float | None,
-        max_score: float,
-        min_score: float,
-    ) -> float:
-        return self.implementation(solves, teams, alpha, beta, max_score, min_score)
 
 
 def assert_none(parameter: float | None, label: str) -> float:
@@ -64,78 +38,15 @@ def or_default(parameter: float | None, default: float) -> float:
     return parameter if parameter is not None else default
 
 
-class JeopardyFormula(enum.Enum):
-    """Various jeopardy scoring formulas"""
-
-    def __str__(self):
-        return self.name
-
-    # Exponential formula for fixed team counts used at DHM (2025: alpha = 0.705, 2024: alpha = 1.7)
-    DHM = Wrapper(
-        lambda solves, teams, alpha, beta, min_score, max_score: max_score
-        * (min_score / max_score)
-        ** ((max(0, solves - 1) / max(1, teams - 1)) ** or_default(alpha, 0.705))
-        + assert_none(beta, "beta")
-    )
-    # "Normal" decaying formula used e.g. by 34C3 CTF and CSCG
-    CSCG = Wrapper(
-        lambda solves, _teams, alpha, beta, min_score, max_score: min_score
-        + (max_score - min_score)
-        / (
-            1
-            + (max(0, solves - 1) / or_default(beta, 11.92201))
-            ** or_default(alpha, 1.206069)
-        )
-    )
-    # "Normal" decaying formula used e.g. by hxp CTF
-    hxp = Wrapper(
-        lambda solves, _teams, alpha, beta, _min_score, max_score: max_score
-        * min(1, or_default(alpha, 10.0) / (or_default(beta, 9.0) + solves))
-    )
-    # "Normal" decaying formula used e.g. by ECSC 2025
-    ECSC2025 = Wrapper(
-        lambda solves, teams, _alpha, _beta, _min_score, max_score: max(
-            int(max_score * (30 / (29 + max(solves, 1))) ** 3),
-            0,
-        )
-    )
-
-
-class AttackerMode(enum.Enum):
-    """How to determine which teams are attacking"""
-
-    Everyone = 0  # Everyone is attacking all the time
-    Successful = 1  # Only someone who actually gets a flag from this round is attacking
-    Scaled = 2  # Same as `Successful`, but scale the "value" of the attackers up to the full team count
-
-
 @dataclasses.dataclass(kw_only=True)
-class ATKLABv2(ScoringFormula):
-    """This is a jeopardy-based scoring formula"""
+class ECSC2025(ScoringFormula):
+    """The A/D scoring formula used in ECSC2025."""
 
-    jeopardy: JeopardyFormula
-    alpha: float | None = None  # Formula-specfic parameters
-    beta: float | None = None  # Formula-specific parameters
-    base: float = 10.0  # Base challenge value / scaling factor
-    min: float = 1.0  # Minimum value per challenge
-
-    attackers: AttackerMode = AttackerMode.Scaled
-    defense_compensation: bool = (
-        True  # Ensure unsuccessful attackers are not unduly punished
-    )
-
+    base: float = 10.0
     nop_team: TeamName | None = TeamName("NOP")
 
-    def _jeopardy(self, solves: float, ctf: CTF) -> float:
-        # Forcibly clamp the score to 0 - capturing flags should never be worth negative points.
-        # Note that the solve count is a float rather than an int because all formulas allow
-        # interpolation and it could be useful in some places.
-        return max(
-            self.jeopardy.value(
-                solves, len(ctf.teams), self.alpha, self.beta, self.min, self.base
-            ),
-            0,
-        )
+    def _jeopardy(self, solves: float) -> float:
+        return int(self.base * (30 / (29 + max(solves, 1))) ** 3)
 
     def evaluate(self, ctf: CTF) -> Scoreboard:
         if self.nop_team is not None and self.nop_team not in ctf.teams:
@@ -219,7 +130,7 @@ class ATKLABv2(ScoringFormula):
                     flag = ctf.flags[flag_id]
                     if flag.owner == team or self.nop_team in (flag.owner, team):
                         continue
-                    attack += self._jeopardy(ctf.flag_captures[flag_id].count, ctf)
+                    attack += self._jeopardy(ctf.flag_captures[flag_id].count)
                 scoreboard[team] += Score.default(attack=attack)
 
             # Defense flags:
@@ -229,15 +140,11 @@ class ATKLABv2(ScoringFormula):
             for service, flagstore in ctf.flagstores:
                 # Attackers for flags deployed this round in service, flagstore.
                 victims_by_attacker = attacked_teams[(round_id, service, flagstore)]
-                match self.attackers:
-                    case AttackerMode.Everyone:
-                        attackers = ctf.teams
-                    case AttackerMode.Successful | AttackerMode.Scaled:
-                        attackers = [
-                            team
-                            for team in ctf.teams
-                            if len(victims_by_attacker.get(team, set())) > 0
-                        ]
+                attackers = [
+                    team
+                    for team in ctf.teams
+                    if len(victims_by_attacker.get(team, set())) > 0
+                ]
 
                 for team in ctf.teams:
                     if team == self.nop_team:
@@ -255,8 +162,6 @@ class ATKLABv2(ScoringFormula):
                             continue
 
                         defense = 0
-                        max_defense = 0
-
                         max_check_round = round_id + ctf.config.flag_validity
                         max_check_round = min(len(ctf.rounds), max_check_round)
                         for check_round_id_ in range(round_id, max_check_round):
@@ -267,9 +172,8 @@ class ATKLABv2(ScoringFormula):
                             not_exploited = max_victims - len(
                                 victims_by_attacker[attacker]
                             )
-                            value = self._jeopardy(not_exploited, ctf)
-                            if self.attackers == AttackerMode.Scaled:
-                                value *= max_victims / len(attackers)
+                            value = self._jeopardy(not_exploited)
+                            value *= max_victims / len(attackers)
                             value = value / ctf.config.flag_validity
 
                             # Ensure the service was OK or RECOVERING.
@@ -283,10 +187,9 @@ class ATKLABv2(ScoringFormula):
                                 flag_states = ctf.flag_states[check_round_id]
                                 if flag_states.get(flag_id) == FlagState.OK:
                                     defense += value
-                            max_defense += value
 
-                        if self.defense_compensation and attacker == team:
-                            scoreboard[team] += Score.default(attack=max_defense)
+                        if attacker == team:
+                            scoreboard[team] += Score.default(attack=defense)
                         elif attacker != team:
                             scoreboard[team] += Score.default(defense=defense)
 
