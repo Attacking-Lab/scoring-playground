@@ -209,9 +209,9 @@ class CTF:
     def slice(
         self, from_round: int | None = None, to_round: int | None = None
     ) -> typing.Self:
-        """Slices a subrange of the CTF (think rounds[from_round:to_round + 1])"""
+        """Slices a subrange of the CTF (think rounds[from_round:to_round])"""
         from_round = from_round if from_round is not None else 0
-        to_round = (to_round + 1) if to_round is not None else len(self.rounds)
+        to_round = to_round if to_round is not None else len(self.rounds)
         sliced = dataclasses.replace(
             self,
             rounds=self.rounds[from_round:to_round],
@@ -330,6 +330,10 @@ class Score:
 
     combined: float
     categories: typing.Mapping[str, float] = dataclasses.field(compare=False)
+
+    def __init__(self, combined: float, **categories) -> None:
+        object.__setattr__(self, "combined", combined)
+        object.__setattr__(self, "categories", categories)
 
     def __add__(self, other: typing.Self) -> typing.Self:
         return type(self)(
