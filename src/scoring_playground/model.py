@@ -331,9 +331,12 @@ class Score:
     combined: float
     categories: typing.Mapping[str, float] = dataclasses.field(compare=False)
 
-    def __init__(self, combined: float, **categories) -> None:
+    def __init__(self, combined: float, **kwargs) -> None:
         object.__setattr__(self, "combined", combined)
-        object.__setattr__(self, "categories", categories)
+        if "categories" in kwargs:
+            object.__setattr__(self, "categories", kwargs["categories"])
+        else:
+            object.__setattr__(self, "categories", kwargs)
 
     def __add__(self, other: typing.Self) -> typing.Self:
         return type(self)(
