@@ -2,8 +2,10 @@
 name = "scoring-playground"
 version = "0.1.0"
 description = "AD CTF scoring playground"
+license = "MIT"
 authors = [
-    { name = "Tobias Holl", email = "tobias@tholl.xyz" }
+    { name = "Tobias Holl", email = "tobias@tholl.xyz" },
+    { name = "Louis Burda", email = "dev@sinitax.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
@@ -12,8 +14,11 @@ dependencies = [
     "tabulate>=0.9.0",
     "types-tabulate>=0.9.0.20241207",
     "wcwidth>=0.2.13",
-    "matplotlib>=3.9.0",
-    "pyqt5>=5.15.11",
+]
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.6",
 ]
 
 [project.scripts]
