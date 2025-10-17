@@ -19,6 +19,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "matplotlib>=3.10.6",
+    "pytest>=8.4.2",
 ]
 
 [project.scripts]

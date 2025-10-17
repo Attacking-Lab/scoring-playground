@@ -1,3 +1,6 @@
 [submodule "ctfs/ecsc2025/upstream"]
 	path = ctfs/ecsc2025/upstream
 	url = git@github.com:attacking-lab/ecsc2025-gameserver-db
+[submodule "ctfs/ecsc2024/upstream"]
+	path = ctfs/ecsc2024/upstream
+	url = https://github.com/ECSC2024/ECSC2024-CTF-AD.git
