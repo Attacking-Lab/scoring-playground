@@ -34,7 +34,7 @@ class SaarCTF2024(ScoringFormula):
     def _rank(
         scoreboard: Scoreboard, teams: typing.Sequence[TeamName]
     ) -> typing.Mapping[TeamName, int]:
-        ordered = sorted(((scoreboard[team], team) for team in teams), reverse=True)
+        ordered = sorted(((scoreboard[team].combined, team) for team in teams), reverse=True)
         previous = None
         ranking = {}
         counter = 1
@@ -46,7 +46,7 @@ class SaarCTF2024(ScoringFormula):
                     rank = previous_rank
             ranking[team] = rank
             previous = (rank, score)
-            if score.combined > 0:
+            if score > 0:
                 counter += 1
         return ranking
 
@@ -57,6 +57,9 @@ class SaarCTF2024(ScoringFormula):
             )
 
         scoreboard: Scoreboard = collections.defaultdict(Score.default)
+        for team in ctf.teams:
+            _ = scoreboard[team]
+
         rankings: dict[RoundId, typing.Mapping[TeamName, int]] = {}
         previous_slas: dict[
             RoundId, typing.Mapping[tuple[TeamName, ServiceName], float]
@@ -89,13 +92,13 @@ class SaarCTF2024(ScoringFormula):
             # Compute attack scores
             captured_flags: set[FlagId] = set()
             for team, team_data in round_data.items():
-                attack = 0.0
                 for flag_id in team_data.flags_captured:
                     flag = ctf.flags[flag_id]
                     if flag.owner == self.nop_team:
                         # These are not even submitted in saarCTF data.
                         continue
-                    captured_flags.add(flag_id)
+                    if team == flag.owner:
+                        continue
 
                     if flag.round_id > 0:
                         victim_rank = rankings[flag.round_id][flag.owner]
@@ -112,24 +115,34 @@ class SaarCTF2024(ScoringFormula):
                         + previous_captures
                     )
 
-                    if previous_captures:
-                        previous_flag_value = (
-                            1
-                            + (1 / previous_captures) ** 0.5
-                            + (1 / victim_rank) ** 0.5
-                        )
-                    else:
-                        previous_flag_value = 0
                     current_flag_value = (
                         1 + (1 / current_captures) ** 0.5 + (1 / victim_rank) ** 0.5
                     )
 
-                    attack += (
-                        (current_flag_value - previous_flag_value)
-                        / ctf.services[flag.service].flag_rate
-                        * self.off_factor
-                    )
-                scoreboard[team] += Score.default(attack=attack)
+                    def delta(previous_flag_value):
+                        return (
+                            (current_flag_value - previous_flag_value)
+                            / ctf.services[flag.service].flag_rate
+                            * self.off_factor
+                        )
+
+                    if flag_id not in captured_flags:
+                        for related_team in ctf.flag_captures[flag_id].by[RoundId(round_id-1)]:
+                            previous_flag_value = (
+                                1
+                                + (1 / previous_captures) ** 0.5
+                                + (1 / victim_rank) ** 0.5
+                            )
+                            attack = delta(previous_flag_value)
+                            if related_team == "C4T BuT S4D":
+                                print(round_id, related_team, flag.service, flag.owner, previous_captures, attack)
+                            scoreboard[related_team] += Score.default(attack=attack)
+                    captured_flags.add(flag_id)
+
+                    attack = delta(0)
+                    if team == "C4T BuT S4D":
+                        print(round_id, flag.flag_id, attack)
+                    scoreboard[team] += Score.default(attack=attack)
 
             # Compute defense scores
             for flag_id in captured_flags:
